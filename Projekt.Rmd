@@ -78,10 +78,10 @@ attr_model <- lm(rating ~ attr + trait, data = attr.x.other)
 summary(attr_model)
 ```
 Uočavamo definitnu linearnu korelaciju između attraktivnoti i ostalih karakterisitika
+
 # Lažu li participatni o tome što im je zapravo važno
 
-**Idea:** Compare what participants say they value (Time 1 preferences) with what actually predicts a "Yes" decision during the event (`dec`).
-Usporedba toga što partcipanti kažu da im je važno protiv toga što zapravo predviđa odluku
+Usporedba stavki za koje ljudi tvrde da su im važne protiv tipa ljudi kojeg na kraju izaberu.
 
 ## Što ljudi kažu da im je važno
 
@@ -140,10 +140,10 @@ choice_table[order(choice_table$r, decreasing = TRUE), ]
 
 Atrakcija ,zabava te isti interesi najviše koreliraju s odlukom pa bi se koglo reći da su oni najbitni za odluku. Dok inteligencija ne korelira toliko iako je druga ajpoželjnija karakteristika.
 
-# Logistička regresija za za predviđanje dec?
+# Logistička regresija za predviđanje dec
 
-## Linearna regresija  
-###Možemo li predvidjeti hoće li sudionik reći “da” (`dec`)?
+## Logistička regresija  
+### Možemo li predvidjeti hoće li sudionik reći “da” (`dec`)?
 
 
 ```{r glm dec}
@@ -152,14 +152,106 @@ glm_data <- data %>%
   mutate(dec = factor(dec, levels = c(0,1))) %>%
   drop_na()
 
-m_glm <- glm(dec ~ attr + intel + fun + sinc + amb +shar,
+karakteristike_glm <- glm(dec ~ attr + intel + fun + sinc + amb +shar,
              data = glm_data, family = binomial)
 
-# koeficijenti + odds ratio
-tidy(m_glm, exponentiate = TRUE, conf.int = TRUE)
-summary(m_glm)
+
+tidy(karakteristike_glm, exponentiate = TRUE, conf.int = TRUE)
+summary(karakteristike_glm)
 ```
-### train fun linearna regresija (prediktivno)
+Opet uviđamo slično kao i u korelaciiji da najvažniji atrakcija, zabava i zajednički interesi.
+
+```{r glm-pred-plot}
+# Predicted probability vs attractiveness (others held at mean)
+glm_pred_grid <- glm_data %>%
+  summarize(
+    attr = seq(min(attr, na.rm = TRUE), max(attr, na.rm = TRUE), length.out = 50),
+    intel = mean(intel, na.rm = TRUE),
+    fun = mean(fun, na.rm = TRUE),
+    sinc = mean(sinc, na.rm = TRUE),
+    amb = mean(amb, na.rm = TRUE),
+    shar = mean(shar, na.rm = TRUE)
+  )
+
+glm_pred_grid$pred <- predict(karakteristike_glm, newdata = glm_pred_grid, type = "response")
+
+ggplot(glm_pred_grid, aes(x = attr, y = pred)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  labs(
+    title = "Predicted Pr(dec = 1) by Attractiveness",
+    x = "Attractiveness (attr)",
+    y = "Predicted probability"
+  )
+```
+
+# Calibration bias: prob vs actual dec_o
+
+Usporedba samoprocjene (`prob`) s realnim ishodom (`dec_o`) pokazuje precjenjuju li sudionici šansu da druga osoba kaže “da”.
+
+```{r calibration-bias}
+calib_data <- data %>%
+  select(prob, dec_o) %>%
+  mutate(
+    prob = prob / 10
+  ) %>%
+  drop_na()
+
+# Bin probs into deciles for calibration curve
+calib_bins <- calib_data %>%
+  mutate(bin = cut(prob, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)) %>%
+  group_by(bin) %>%
+  summarize(
+    mean_prob = mean(prob),
+    actual_rate = mean(dec_o),
+    n = n(),
+    .groups = "drop"
+  )
+
+ggplot(calib_bins, aes(x = mean_prob, y = actual_rate)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "Calibration: Expected vs Actual 'Yes' Rate",
+    x = "Mean expected probability (prob)",
+    y = "Observed 'Yes' rate (dec_o)"
+  )
+```
+
+```{r calibration-monte-carlo}
+set.seed(123)
+
+# Monte Carlo: compare expected vs observed yes-rate under the stated probabilities
+mc_trials <- 1000
+mc_expected <- numeric(mc_trials)
+
+for (i in seq_len(mc_trials)) {
+  sim_yes <- rbinom(n = nrow(calib_data), size = 1, prob = calib_data$prob)
+  mc_expected[i] <- mean(sim_yes)
+}
+
+observed_rate <- mean(calib_data$dec_o)
+expected_rate <- mean(calib_data$prob)
+
+tibble(
+  observed_rate = observed_rate,
+  expected_rate = expected_rate,
+  mc_mean = mean(mc_expected),
+  mc_sd = sd(mc_expected)
+)
+
+ggplot(tibble(mc_expected = mc_expected), aes(x = mc_expected)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = observed_rate, color = "red", linewidth = 1) +
+  geom_vline(xintercept = expected_rate, color = "black", linetype = "dashed") +
+  labs(
+    title = "Monte Carlo: Expected Yes-Rate Distribution",
+    x = "Simulated mean yes-rate",
+    y = "Count"
+  )
+```
+
+### funkcija train linearna regresija (prediktivno)
 
 
 ```{r caret dec}
@@ -185,7 +277,7 @@ pred <- predict(fit_lm, newdata = test_data)
 postResample(pred = pred, obs = test_data$like)
 
 ```
-## 6) kNN klasifikacija + confusionMatrix
+## kNN klasifikacija + confusionMatrix
 
 ### Pitanje  
 **Može li kNN dobro predvidjeti `match`?**
@@ -219,7 +311,7 @@ confusionMatrix(pred_knn, test_knn$match)
 
 ---
 ```
-## 7) Decision Tree (caret + rpart)
+## Decision Tree (caret + rpart)
 
 ### Pitanje  
 **Koje varijable najviše “odlučuju” o `match` prema stablu?**
@@ -253,15 +345,14 @@ confusionMatrix(pred_tree, test_tree$match)
 
 # važnost varijabli
 varImp(fit_tree)
-
+```
 ---
 
-## 8) Usporedba modela (logistička vs kNN vs tree)
+## Usporedba modela (logistička vs kNN vs tree)
 
 ### Pitanje  
-**Koji model daje najbolju točnost i je li točnost vrijedna gubitka interpretabilnosti?**
+Koji model daje najbolju točnost i je li točnost vrijedna gubitka interpretabilnosti?**
 
-```
 
 ```{r model-compare}
 # Logistic regression kao ML baseline u caret-u
@@ -295,5 +386,6 @@ results <- tibble::tibble(
                cm_knn$overall["Accuracy"],
                cm_tree$overall["Accuracy"])
 )
-```
 results
+```
+
