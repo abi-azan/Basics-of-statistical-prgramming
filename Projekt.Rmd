@@ -1,30 +1,299 @@
 ---
 title: "OSP projekt"
 author: "36556413 Albert Maršić"
-date: "2026-01-28"
+date: "2026-01-29"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(tibble)
+library(caret)
+library(broom)
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r data-load}
+data <- read.csv("Speed Dating Data.csv")
+summary(data)
+glimpse(data)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Primječujemo da imamo na prvi pogled velik broj nepoznatih/nepotpunih čelija, to bi nam moglo otežati analizu.
+
+# Dali ljepota utjeće (prividno) na druge kvalitete
+
+Da i se osoba ćini bolja i u drugim stavkama ako je zgodnija
+```{r attr effect cor}
+zacajke <- c("attr", "fun", "intel", "sinc")
+cor_table <- cor(data[zacajke], use = "pairwise.complete.obs") # imamo puno NA pa treba eliminirati nepotpune podatke
+
+attr_table <- tibble(
+  trait = c("fun", "intel", "sinc"),
+  dostupnih_podataka = c(
+    data %>% select(attr, fun) %>% drop_na() %>% nrow(),
+    data %>% select(attr, intel) %>% drop_na() %>% nrow(),
+    data %>% select(attr, sinc) %>% drop_na() %>% nrow()
+  ),
+  korelacija = round(cor_table["attr", c("fun", "intel", "sinc")], 3)
+)
+
+attr_table
+```
+
+
+
+
+
+```{r attr plot}
+attr.x.other <- data %>%
+  select(all_of(zacajke)) %>%
+  pivot_longer(cols = -attr, names_to = "trait", values_to = "rating") %>%
+  drop_na()
+attr.x.other$trait = factor(attr.x.other$trait)
+ggplot(attr.x.other, aes(x = attr, y = rating)) +
+  geom_point(alpha = 0.1, size = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "firebrick") +
+  facet_wrap(~ trait, ncol = 3) +
+  labs(
+    title = "Efekt ljepote na percepciju drugih karakteristika"
+  )
+ggplot(attr.x.other, aes(x = attr, y = rating),color="trait") +
+  geom_point(alpha = 0.5,position = "jitter") +
+  geom_smooth(method = "lm", color = "red")
+
+
+```
+
+
+```{r attr linear model}
+attr_model <- lm(rating ~ attr + trait, data = attr.x.other)
+
+summary(attr_model)
+```
+Uočavamo definitnu linearnu korelaciju između attraktivnoti i ostalih karakterisitika
+# Lažu li participatni o tome što im je zapravo važno
+
+**Idea:** Compare what participants say they value (Time 1 preferences) with what actually predicts a "Yes" decision during the event (`dec`).
+Usporedba toga što partcipanti kažu da im je važno protiv toga što zapravo predviđa odluku
+
+## Što ljudi kažu da im je važno
+
+Za svakog sudionika izvucemo prefernce
+```{r stated-preferences}
+pref_cols <- c("attr1_1", "sinc1_1", "intel1_1", "fun1_1", "amb1_1", "shar1_1")
+
+# One row per participant (preferences are constant per participant)
+prefs <- data %>%
+  distinct(iid, .keep_all = TRUE) %>%
+  select(all_of(pref_cols)) %>%
+  drop_na()
+
+# Convert to shares so 1-10 and 100-point scales are comparable
+pref_shares <- prefs / rowSums(prefs)
+
+#mean_pref_shares <- sort(colMeans(pref_shares), decreasing = TRUE)
+#mean_pref_shares
+
+mean_pref_shares2 <- sort(sapply(pref_shares,mean), decreasing = TRUE)
+mean_pref_shares2
+
+```
+
+```{r plot preferceni}
+pref_plot <- tibble(
+  attribute = names(mean_pref_shares2),
+  mean_share = as.numeric(mean_pref_shares2)
+)
+
+ggplot(pref_plot, aes(x = attribute, y = mean_share)) +
+  geom_col(fill = "lightblue") +
+  coord_flip() +
+  labs(
+    title = "Proprocija važnosti prefernece"
+  )
+```
+
+## Predikcija izbora
+
+Korelacija
+```{r pravi izbori}
+choice_attrs <- c("attr", "fun", "intel", "sinc", "amb", "shar")
+
+choice_cor <- sapply(choice_attrs, function(v) {
+  cor(data$dec, data[[v]], use = "pairwise.complete.obs")
+})
+
+choice_table <- tibble(
+  attribute = choice_attrs,
+  r = round(choice_cor, 3)
+)
+
+choice_table[order(choice_table$r, decreasing = TRUE), ]
+```
+
+Atrakcija ,zabava te isti interesi najviše koreliraju s odlukom pa bi se koglo reći da su oni najbitni za odluku. Dok inteligencija ne korelira toliko iako je druga ajpoželjnija karakteristika.
+
+# Logistička regresija za za predviđanje dec?
+
+## Linearna regresija  
+###Možemo li predvidjeti hoće li sudionik reći “da” (`dec`)?
+
+
+```{r glm dec}
+glm_data <- data %>%
+  select(dec, attr, intel, fun, sinc,amb,shar) %>%
+  mutate(dec = factor(dec, levels = c(0,1))) %>%
+  drop_na()
+
+m_glm <- glm(dec ~ attr + intel + fun + sinc + amb +shar,
+             data = glm_data, family = binomial)
+
+# koeficijenti + odds ratio
+tidy(m_glm, exponentiate = TRUE, conf.int = TRUE)
+summary(m_glm)
+```
+### train fun linearna regresija (prediktivno)
+
+
+```{r caret dec}
+set.seed(123)
+
+ml_lm_data <- data %>%
+  select(like, attr, intel, fun, amb, shar) %>%
+  drop_na()
+
+idx <- createDataPartition(ml_lm_data$like, p = 0.8, list = FALSE)
+train_data <- ml_lm_data[idx, ]
+test_data  <- ml_lm_data[-idx, ]
+
+ctrl <- trainControl(method = "cv", number = 5)
+
+fit_lm <- train(like ~ ., data = train_data,
+                method = "lm",
+                trControl = ctrl)
+
+fit_lm
+
+pred <- predict(fit_lm, newdata = test_data)
+postResample(pred = pred, obs = test_data$like)
+
+```
+## 6) kNN klasifikacija + confusionMatrix
+
+### Pitanje  
+**Može li kNN dobro predvidjeti `match`?**
+
+
+```{r caret-knn}
+set.seed(123)
+
+knn_data <- data %>%
+  select(match, attr, intel, fun, like) %>%
+  drop_na() %>%
+  mutate(match = factor(match, levels = c(0,1)))
+
+idx <- createDataPartition(knn_data$match, p = 0.8, list = FALSE)
+train_knn <- knn_data[idx, ]
+test_knn  <- knn_data[-idx, ]
+
+# kNN je osjetljiv na skalu -> centriranje i skaliranje
+ctrl <- trainControl(method = "cv", number = 5)
+
+fit_knn <- train(match ~ ., data = train_knn,
+                 method = "knn",
+                 preProcess = c("center", "scale"),
+                 tuneLength = 10,
+                 trControl = ctrl)
+
+fit_knn
+
+pred_knn <- predict(fit_knn, newdata = test_knn)
+confusionMatrix(pred_knn, test_knn$match)
+
+---
+```
+## 7) Decision Tree (caret + rpart)
+
+### Pitanje  
+**Koje varijable najviše “odlučuju” o `match` prema stablu?**
+
+
+
+```{r caret-tree}
+set.seed(123)
+library(rpart)
+
+tree_data <- data %>%
+  select(match, attr, intel, fun, like, samerace) %>%
+  drop_na() %>%
+  mutate(match = factor(match, levels = c(0,1)))
+
+idx <- createDataPartition(tree_data$match, p = 0.8, list = FALSE)
+train_tree <- tree_data[idx, ]
+test_tree  <- tree_data[-idx, ]
+
+ctrl <- trainControl(method = "cv", number = 5)
+
+fit_tree <- train(match ~ ., data = train_tree,
+                  method = "rpart",
+                  trControl = ctrl,
+                  tuneLength = 10)
+
+fit_tree
+
+pred_tree <- predict(fit_tree, newdata = test_tree)
+confusionMatrix(pred_tree, test_tree$match)
+
+# važnost varijabli
+varImp(fit_tree)
+
+---
+
+## 8) Usporedba modela (logistička vs kNN vs tree)
+
+### Pitanje  
+**Koji model daje najbolju točnost i je li točnost vrijedna gubitka interpretabilnosti?**
+
+```
+
+```{r model-compare}
+# Logistic regression kao ML baseline u caret-u
+set.seed(123)
+
+glm_ml_data <- data %>%
+  select(match, attr, intel, fun, like, samerace) %>%
+  drop_na() %>%
+  mutate(match = factor(match, levels = c(0,1)))
+
+idx <- createDataPartition(glm_ml_data$match, p = 0.8, list = FALSE)
+train_glm <- glm_ml_data[idx, ]
+test_glm  <- glm_ml_data[-idx, ]
+
+ctrl <- trainControl(method = "cv", number = 5)
+
+fit_glm_ml <- train(match ~ ., data = train_glm,
+                    method = "glm",
+                    family = binomial,
+                    trControl = ctrl)
+
+pred_glm <- predict(fit_glm_ml, newdata = test_glm)
+cm_glm <- confusionMatrix(pred_glm, test_glm$match)
+
+cm_knn <- confusionMatrix(pred_knn, test_knn$match)
+cm_tree <- confusionMatrix(pred_tree, test_tree$match)
+
+results <- tibble::tibble(
+  model = c("Logistic (caret glm)", "kNN", "Decision tree"),
+  accuracy = c(cm_glm$overall["Accuracy"],
+               cm_knn$overall["Accuracy"],
+               cm_tree$overall["Accuracy"])
+)
+```
+results
